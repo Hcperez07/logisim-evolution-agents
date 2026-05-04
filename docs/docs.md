@@ -6,6 +6,7 @@
 
 * [« Go back](../README.md)
 * **Additional information**
+  * [Flujo CLI para agentes `.circ`](agent_workflow.md)
   * [Limitations](#limitations)
   * [History of Logisim](#project-history)
   * [External documentation](#external-reads)
