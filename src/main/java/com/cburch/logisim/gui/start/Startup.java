@@ -24,6 +24,7 @@ import com.cburch.logisim.gui.icons.ErrorIcon;
 import com.cburch.logisim.gui.icons.InfoIcon;
 import com.cburch.logisim.gui.icons.QuestionIcon;
 import com.cburch.logisim.gui.icons.WarningIcon;
+import com.cburch.logisim.gui.main.ExportImageService;
 import com.cburch.logisim.gui.main.Print;
 import com.cburch.logisim.gui.menu.LogisimMenuBar;
 import com.cburch.logisim.gui.menu.WindowManagers;
@@ -127,6 +128,11 @@ public class Startup implements AWTEventListener {
   /* Testing Xml (circ file) Variable */
   private String testCircPathInput = null;
   private String testCircPathOutput = null;
+  private String exportImageCircPath = null;
+  private String exportImageCircuitName = null;
+  private String exportImageFormat = null;
+  private String exportImageOutputPath = null;
+  private boolean exportAllCircuits = false;
 
   private Startup(boolean isTty) {
     this.isTty = isTty;
@@ -175,6 +181,8 @@ public class Startup implements AWTEventListener {
   private static final String ARG_TEST_VECTOR_LONG = "test-vector";
   private static final String ARG_NO_SPLASH_LONG = "no-splash";
   private static final String ARG_MAIN_CIRCUIT = "toplevel-circuit";
+  private static final String ARG_EXPORT_IMAGE_LONG = "export-image";
+  private static final String ARG_ALL_CIRCUITS_LONG = "all-circuits";
 
   /**
    * Parses provided string expecting it represent boolean option. Accepted values
@@ -341,6 +349,8 @@ public class Startup implements AWTEventListener {
     addOption(opts, "argTestVectorOption", ARG_TEST_VECTOR_LONG, ARG_TEST_VECTOR_SHORT, 2);
     addOption(opts, "argTestCircuitOption", ARG_TEST_CIRCUIT_LONG, ARG_TEST_CIRCUIT_SHORT, 1);     // FIXME add "Option" suffix to key name
     addOption(opts, "argTestCircGenOption", ARG_TEST_CIRC_GEN_LONG, ARG_TEST_CIRC_GEN_SHORT, 2);   // FIXME add "Option" suffix to key name
+    addOption(opts, "argTestCircuitOption", ARG_EXPORT_IMAGE_LONG, Option.UNLIMITED_VALUES);
+    addOption(opts, "argNoSplashOption", ARG_ALL_CIRCUITS_LONG);
 
     CommandLine cmd;
     try {
@@ -359,7 +369,7 @@ public class Startup implements AWTEventListener {
     // see whether we'll be using any graphics
     var isTty = false;
     var shallClearPreferences = false;
-    if (cmd.hasOption(ARG_TTY_SHORT) || cmd.hasOption(ARG_TEST_FGPA_SHORT) || cmd.hasOption(ARG_TEST_FGPA_LONG)) {
+    if (cmd.hasOption(ARG_TTY_SHORT) || cmd.hasOption(ARG_TEST_FGPA_SHORT) || cmd.hasOption(ARG_TEST_FGPA_LONG) || cmd.hasOption(ARG_EXPORT_IMAGE_LONG)) {
       isTty = true;
       Main.headless = true;
     } else {
@@ -408,6 +418,8 @@ public class Startup implements AWTEventListener {
         case ARG_TEST_CIRCUIT_LONG -> handleArgTestCircuit(startup, opt);
         case ARG_TEST_CIRC_GEN_LONG -> handleArgTestCircGen(startup, opt);
         case ARG_MAIN_CIRCUIT -> handleArgMainCircuit(startup, opt);
+        case ARG_EXPORT_IMAGE_LONG -> handleArgExportImage(startup, opt);
+        case ARG_ALL_CIRCUITS_LONG -> handleArgAllCircuits(startup, opt);
         default -> RC.OK; // should not really happen IRL.
       };
       lastHandlerRc = optHandlerRc;
@@ -657,6 +669,35 @@ public class Startup implements AWTEventListener {
     return RC.OK;
   }
 
+
+  private static RC handleArgAllCircuits(Startup startup, Option opt) {
+    startup.exportAllCircuits = true;
+    return RC.OK;
+  }
+
+  private static RC handleArgExportImage(Startup startup, Option opt) {
+    final var args = opt.getValues();
+    if (args == null || args.length < 3 || args.length > 4) {
+      System.err.println("Invalid arguments for --export-image. Use: --export-image <file.circ> [subcircuit] <png|svg> <output>");
+      return RC.QUIT;
+    }
+    startup.exportImageCircPath = args[0];
+    if (args.length == 3) {
+      startup.exportImageFormat = args[1].toLowerCase();
+      startup.exportImageOutputPath = args[2];
+    } else {
+      startup.exportImageCircuitName = args[1];
+      startup.exportImageFormat = args[2].toLowerCase();
+      startup.exportImageOutputPath = args[3];
+    }
+    if (!"png".equals(startup.exportImageFormat) && !"svg".equals(startup.exportImageFormat)) {
+      System.err.println("Invalid export format: " + startup.exportImageFormat + ". Use png or svg.");
+      return RC.QUIT;
+    }
+    startup.showSplash = false;
+    startup.exitAfterStartup = true;
+    return RC.OK;
+  }
   private static RC handleArgMainCircuit(Startup startup, Option opt) {
     startup.circuitToTest = opt.getValues()[0];
     return RC.OK;
@@ -953,6 +994,32 @@ public class Startup implements AWTEventListener {
     // if user has double-clicked a file to open, we'll
     // use that as the file to open now.
     initialized = true;
+
+    if (exportImageCircPath != null) {
+      try {
+        final var project = ProjectActions.doOpenNoWindow(monitor, new File(exportImageCircPath));
+        final var allCircuits = project.getLogisimFile().getCircuits();
+        final var circuits = new ArrayList<com.cburch.logisim.circuit.Circuit>();
+        if (exportAllCircuits) {
+          circuits.addAll(allCircuits);
+        } else if (exportImageCircuitName != null) {
+          final var circ = project.getLogisimFile().getCircuit(exportImageCircuitName);
+          if (circ == null) {
+            System.err.println("Circuit not found: " + exportImageCircuitName);
+            System.exit(2);
+          }
+          circuits.add(circ);
+        } else {
+          circuits.add(project.getLogisimFile().getMainCircuit());
+        }
+        final var format = "svg".equals(exportImageFormat) ? ExportImageService.Format.SVG : ExportImageService.Format.PNG;
+        ExportImageService.export(project, circuits, new ExportImageService.ExportOptions(format, 1.0, true, new File(exportImageOutputPath)));
+        System.exit(0);
+      } catch (Exception ex) {
+        System.err.println("Image export failed: " + ex.getMessage());
+        System.exit(1);
+      }
+    }
 
     // Check for unnamed autosaves here and allow to save them and/or open them again
     if (testVector == null && testCircPathInput == null) {
