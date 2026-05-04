@@ -323,12 +323,17 @@ public class Startup implements AWTEventListener {
    * Return code of last run argument handler.
    */
   private static RC lastHandlerRc;
+  private static boolean lastHandlerFailed;
 
   /**
    * Returns {@true} if last argument handler called requested app termination (w/o error).
    */
   public boolean shallQuit() {
     return lastHandlerRc == RC.QUIT;
+  }
+
+  public boolean shallQuitWithError() {
+    return shallQuit() && lastHandlerFailed;
   }
 
   /**
@@ -417,6 +422,7 @@ public class Startup implements AWTEventListener {
       final var opt = optionIter.next();
       // Note: you should have handler for each option. So number of `case`s
       // here should equal number of calls to `addOption()` above.
+      lastHandlerFailed = false;
       final var optHandlerRc = switch (opt.getLongOpt()) {
         case ARG_HELP_LONG -> printHelp(opts);
         case ARG_VERSION_LONG -> printVersion();
@@ -698,6 +704,7 @@ public class Startup implements AWTEventListener {
     final var args = opt.getValues();
     if (args == null || args.length < 3 || args.length > 4) {
       System.err.println("Invalid arguments for --export-image. Use: --export-image <file.circ> [subcircuit] <png|svg> <output>");
+      lastHandlerFailed = true;
       return RC.QUIT;
     }
     startup.exportImageCircPath = args[0];
@@ -711,6 +718,7 @@ public class Startup implements AWTEventListener {
     }
     if (!"png".equals(startup.exportImageFormat) && !"svg".equals(startup.exportImageFormat)) {
       System.err.println("Invalid export format: " + startup.exportImageFormat + ". Use png or svg.");
+      lastHandlerFailed = true;
       return RC.QUIT;
     }
     startup.showSplash = false;
@@ -1141,26 +1149,36 @@ public class Startup implements AWTEventListener {
 
     if (exportImageCircPath != null) {
       try {
-        final var exportRc = runWithTimeout("export-image", () -> {
-          final var project = ProjectActions.doOpenNoWindow(monitor, new File(exportImageCircPath));
-        final var allCircuits = project.getLogisimFile().getCircuits();
-        final var circuits = new ArrayList<com.cburch.logisim.circuit.Circuit>();
-        if (exportAllCircuits) {
-          circuits.addAll(allCircuits);
-        } else if (exportImageCircuitName != null) {
-          final var circ = project.getLogisimFile().getCircuit(exportImageCircuitName);
-          if (circ == null) {
-            System.err.println("Circuit not found: " + exportImageCircuitName);
-            System.exit(2);
-          }
-          circuits.add(circ);
-        } else {
-          circuits.add(project.getLogisimFile().getMainCircuit());
-        }
-        final var format = "svg".equals(exportImageFormat) ? ExportImageService.Format.SVG : ExportImageService.Format.PNG;
-        ExportImageService.export(project, circuits, new ExportImageService.ExportOptions(format, 1.0, true, new File(exportImageOutputPath)));
-          return 0;
-        });
+        final var exportRc =
+            runWithTimeout(
+                "export-image",
+                () -> {
+                  final var project = ProjectActions.doOpenNoWindow(monitor, new File(exportImageCircPath));
+                  final var allCircuits = project.getLogisimFile().getCircuits();
+                  final var circuits = new ArrayList<com.cburch.logisim.circuit.Circuit>();
+                  if (exportAllCircuits) {
+                    circuits.addAll(allCircuits);
+                  } else if (exportImageCircuitName != null) {
+                    final var circ = project.getLogisimFile().getCircuit(exportImageCircuitName);
+                    if (circ == null) {
+                      System.err.println("Circuit not found: " + exportImageCircuitName);
+                      System.exit(2);
+                    }
+                    circuits.add(circ);
+                  } else {
+                    circuits.add(project.getLogisimFile().getMainCircuit());
+                  }
+                  final var format =
+                      "svg".equals(exportImageFormat)
+                          ? ExportImageService.Format.SVG
+                          : ExportImageService.Format.PNG;
+                  ExportImageService.export(
+                      project,
+                      circuits,
+                      new ExportImageService.ExportOptions(
+                          format, 1.0, true, new File(exportImageOutputPath)));
+                  return 0;
+                });
         System.exit(exportRc);
       } catch (Exception ex) {
         System.err.println("Image export failed: " + ex.getMessage());
