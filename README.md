@@ -12,6 +12,7 @@
     * [Nightly builds (unstable)](#nightly-builds)
   * [Pictures of Logisim-evolution](docs/pics.md)
   * [More Information](docs/docs.md)
+  * [Flujo CLI para agentes](docs/agent_workflow.md)
   * [Bug reports & feature requests](https://github.com/logisim-evolution/logisim-evolution/issues)
   * [For developers](docs/developers.md)
   * [How to contribute](docs/developers.md#how-to-contribute)
