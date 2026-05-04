@@ -52,6 +52,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.help.JHelp;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
@@ -187,6 +188,14 @@ public class Startup implements AWTEventListener {
   private static final String ARG_ALL_CIRCUITS_LONG = "all-circuits";
   private static final String ARG_VALIDATE_CIRC_LONG = "validate-circ";
   private static final String ARG_JSON_LONG = "json";
+  private static final String ARG_TIMEOUT_MS_LONG = "timeout-ms";
+  private static final int EXIT_CODE_TIMEOUT = 124;
+  private static final int EXIT_CODE_INTERRUPTED = 130;
+  private static final int EXIT_CODE_SIGTERM = 143;
+  private static final String CLI_LOG_PREFIX = "[logisim-cli]";
+  private static final AtomicBoolean SHUTDOWN_REQUESTED = new AtomicBoolean(false);
+  private static volatile String shutdownSignal = null;
+  private long timeoutMs = 0;
 
   /**
    * Parses provided string expecting it represent boolean option. Accepted values
@@ -357,6 +366,7 @@ public class Startup implements AWTEventListener {
     addOption(opts, "argNoSplashOption", ARG_ALL_CIRCUITS_LONG);
     addOption(opts, "argTestCircuitOption", ARG_VALIDATE_CIRC_LONG, 1);
     addOption(opts, "argNoSplashOption", ARG_JSON_LONG);
+    addOption(opts, "argTimeoutMsOption", ARG_TIMEOUT_MS_LONG, 1);
 
     CommandLine cmd;
     try {
@@ -428,6 +438,7 @@ public class Startup implements AWTEventListener {
         case ARG_ALL_CIRCUITS_LONG -> handleArgAllCircuits(startup, opt);
         case ARG_VALIDATE_CIRC_LONG -> handleArgValidateCirc(startup, opt);
         case ARG_JSON_LONG -> handleArgJson(startup, opt);
+        case ARG_TIMEOUT_MS_LONG -> handleArgTimeoutMs(startup, opt);
         default -> RC.OK; // should not really happen IRL.
       };
       lastHandlerRc = optHandlerRc;
@@ -723,6 +734,61 @@ public class Startup implements AWTEventListener {
     return RC.OK;
   }
 
+  private static RC handleArgTimeoutMs(Startup startup, Option opt) {
+    try {
+      final var parsed = Long.parseLong(opt.getValue());
+      if (parsed <= 0) {
+        logger.error("--{} value must be > 0", ARG_TIMEOUT_MS_LONG);
+        return RC.QUIT;
+      }
+      startup.timeoutMs = parsed;
+      return RC.OK;
+    } catch (NumberFormatException ex) {
+      logger.error("Invalid --{} value: {}", ARG_TIMEOUT_MS_LONG, opt.getValue());
+      return RC.QUIT;
+    }
+  }
+
+  private void installSignalHandler() {
+    Runtime.getRuntime()
+        .addShutdownHook(
+            new Thread(
+                () -> {
+                  SHUTDOWN_REQUESTED.set(true);
+                  final var name = Thread.currentThread().getName();
+                  shutdownSignal = name.contains("INT") ? "SIGINT" : "SIGTERM";
+                  System.err.println(CLI_LOG_PREFIX + " interrupted signal=" + shutdownSignal);
+                  if (monitor != null) {
+                    monitor.close();
+                  }
+                },
+                "logisim-cli-shutdown-hook"));
+  }
+
+  private int runWithTimeout(String operationName, java.util.concurrent.Callable<Integer> operation)
+      throws Exception {
+    if (timeoutMs <= 0) {
+      return operation.call();
+    }
+    final var worker = new Thread(() -> {
+      try {
+        Thread.sleep(timeoutMs);
+      } catch (InterruptedException ignored) {
+        return;
+      }
+      System.err.println(
+          CLI_LOG_PREFIX + " timeout operation=" + operationName + " timeoutMs=" + timeoutMs);
+      System.exit(EXIT_CODE_TIMEOUT);
+    }, "logisim-cli-watchdog");
+    worker.setDaemon(true);
+    worker.start();
+    try {
+      return operation.call();
+    } finally {
+      worker.interrupt();
+    }
+  }
+
 
   /**
    * Handles 4th argument of `--test-fpga` argument which can be either string literal
@@ -976,12 +1042,27 @@ public class Startup implements AWTEventListener {
   }
 
   public void run() {
+    if (isTty || validateCircPath != null || exportImageCircPath != null || testVector != null) {
+      installSignalHandler();
+    }
     if (validateCircPath != null) {
-      System.exit(runValidateCirc());
+      try {
+        System.exit(runWithTimeout("validate", this::runValidateCirc));
+      } catch (Exception ex) {
+        System.err.println(CLI_LOG_PREFIX + " internal-error operation=validate message=" + ex.getMessage());
+        System.exit(2);
+      }
     }
     if (isTty) {
       try {
-        TtyInterface.run(this);
+        runWithTimeout("tty", () -> {
+          TtyInterface.run(this);
+          return 0;
+        });
+        if (SHUTDOWN_REQUESTED.get()) {
+          final var signal = shutdownSignal;
+          System.exit("SIGINT".equals(signal) ? EXIT_CODE_INTERRUPTED : EXIT_CODE_SIGTERM);
+        }
         System.exit(0);
       } catch (Exception t) {
         t.printStackTrace();
@@ -1060,7 +1141,8 @@ public class Startup implements AWTEventListener {
 
     if (exportImageCircPath != null) {
       try {
-        final var project = ProjectActions.doOpenNoWindow(monitor, new File(exportImageCircPath));
+        final var exportRc = runWithTimeout("export-image", () -> {
+          final var project = ProjectActions.doOpenNoWindow(monitor, new File(exportImageCircPath));
         final var allCircuits = project.getLogisimFile().getCircuits();
         final var circuits = new ArrayList<com.cburch.logisim.circuit.Circuit>();
         if (exportAllCircuits) {
@@ -1077,7 +1159,9 @@ public class Startup implements AWTEventListener {
         }
         final var format = "svg".equals(exportImageFormat) ? ExportImageService.Format.SVG : ExportImageService.Format.PNG;
         ExportImageService.export(project, circuits, new ExportImageService.ExportOptions(format, 1.0, true, new File(exportImageOutputPath)));
-        System.exit(0);
+          return 0;
+        });
+        System.exit(exportRc);
       } catch (Exception ex) {
         System.err.println("Image export failed: " + ex.getMessage());
         System.exit(1);
@@ -1172,8 +1256,17 @@ public class Startup implements AWTEventListener {
       for (final var fileToOpen : filesToOpen) {
         try {
           if (testVector != null) {
-            proj = ProjectActions.doOpenNoWindow(monitor, fileToOpen);
-            proj.doTestVector(testVector, circuitToTest);
+            final int testRc;
+            try {
+              testRc = runWithTimeout("test-vector", () -> {
+                final var testProj = ProjectActions.doOpenNoWindow(monitor, fileToOpen);
+                testProj.doTestVector(testVector, circuitToTest);
+                return 0;
+              });
+            } catch (Exception ex) {
+              throw new RuntimeException(ex);
+            }
+            if (testRc != 0) System.exit(testRc);
           } else if (testCircPathInput != null && testCircPathOutput != null) {
             /* This part of the function will create a new circuit file (
              * XML) which will be open and saved again using the  */

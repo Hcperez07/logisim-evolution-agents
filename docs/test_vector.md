@@ -227,6 +227,14 @@ java -jar logisim-evolution.jar --test-vector <circuit_name> <test_vector_file> 
 java -jar logisim-evolution.jar --test-vector dlatch TestsRegisterFile.txt /home/user/Computer.circ
 ```
 
+For CI/agent usage, you can add a hard timeout:
+
+```bash
+java -jar logisim-evolution.jar --timeout-ms 30000 --test-vector dlatch TestsRegisterFile.txt /home/user/Computer.circ
+```
+
+See [Headless CLI kill strategy](agent_kill_strategy.md) for wrapper recommendations and exit-code mapping.
+
 The command will:
 
 1. Load the specified circuit from the project file
