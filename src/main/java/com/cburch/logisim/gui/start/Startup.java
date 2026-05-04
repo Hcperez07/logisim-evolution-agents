@@ -133,6 +133,8 @@ public class Startup implements AWTEventListener {
   private String exportImageFormat = null;
   private String exportImageOutputPath = null;
   private boolean exportAllCircuits = false;
+  private String validateCircPath = null;
+  private boolean validateJsonOutput = false;
 
   private Startup(boolean isTty) {
     this.isTty = isTty;
@@ -183,6 +185,8 @@ public class Startup implements AWTEventListener {
   private static final String ARG_MAIN_CIRCUIT = "toplevel-circuit";
   private static final String ARG_EXPORT_IMAGE_LONG = "export-image";
   private static final String ARG_ALL_CIRCUITS_LONG = "all-circuits";
+  private static final String ARG_VALIDATE_CIRC_LONG = "validate-circ";
+  private static final String ARG_JSON_LONG = "json";
 
   /**
    * Parses provided string expecting it represent boolean option. Accepted values
@@ -351,6 +355,8 @@ public class Startup implements AWTEventListener {
     addOption(opts, "argTestCircGenOption", ARG_TEST_CIRC_GEN_LONG, ARG_TEST_CIRC_GEN_SHORT, 2);   // FIXME add "Option" suffix to key name
     addOption(opts, "argTestCircuitOption", ARG_EXPORT_IMAGE_LONG, Option.UNLIMITED_VALUES);
     addOption(opts, "argNoSplashOption", ARG_ALL_CIRCUITS_LONG);
+    addOption(opts, "argTestCircuitOption", ARG_VALIDATE_CIRC_LONG, 1);
+    addOption(opts, "argNoSplashOption", ARG_JSON_LONG);
 
     CommandLine cmd;
     try {
@@ -369,7 +375,7 @@ public class Startup implements AWTEventListener {
     // see whether we'll be using any graphics
     var isTty = false;
     var shallClearPreferences = false;
-    if (cmd.hasOption(ARG_TTY_SHORT) || cmd.hasOption(ARG_TEST_FGPA_SHORT) || cmd.hasOption(ARG_TEST_FGPA_LONG) || cmd.hasOption(ARG_EXPORT_IMAGE_LONG)) {
+    if (cmd.hasOption(ARG_TTY_SHORT) || cmd.hasOption(ARG_TEST_FGPA_SHORT) || cmd.hasOption(ARG_TEST_FGPA_LONG) || cmd.hasOption(ARG_EXPORT_IMAGE_LONG) || cmd.hasOption(ARG_VALIDATE_CIRC_LONG)) {
       isTty = true;
       Main.headless = true;
     } else {
@@ -420,6 +426,8 @@ public class Startup implements AWTEventListener {
         case ARG_MAIN_CIRCUIT -> handleArgMainCircuit(startup, opt);
         case ARG_EXPORT_IMAGE_LONG -> handleArgExportImage(startup, opt);
         case ARG_ALL_CIRCUITS_LONG -> handleArgAllCircuits(startup, opt);
+        case ARG_VALIDATE_CIRC_LONG -> handleArgValidateCirc(startup, opt);
+        case ARG_JSON_LONG -> handleArgJson(startup, opt);
         default -> RC.OK; // should not really happen IRL.
       };
       lastHandlerRc = optHandlerRc;
@@ -698,6 +706,18 @@ public class Startup implements AWTEventListener {
     startup.exitAfterStartup = true;
     return RC.OK;
   }
+  private static RC handleArgJson(Startup startup, Option opt) {
+    startup.validateJsonOutput = true;
+    return RC.OK;
+  }
+
+  private static RC handleArgValidateCirc(Startup startup, Option opt) {
+    startup.validateCircPath = opt.getValue();
+    startup.showSplash = false;
+    startup.exitAfterStartup = true;
+    return RC.OK;
+  }
+
   private static RC handleArgMainCircuit(Startup startup, Option opt) {
     startup.circuitToTest = opt.getValues()[0];
     return RC.OK;
@@ -915,7 +935,50 @@ public class Startup implements AWTEventListener {
     }
   }
 
+  private int runValidateCirc() {
+    final var file = new File(validateCircPath);
+    final var loader = new Loader(null);
+    try {
+      loader.openLogisimFile(file);
+      if (validateJsonOutput) {
+        System.out.println("{\"file\":\"" + file.getPath().replace("\\", "\\\\").replace("\"", "\\\"") + "\",\"valid\":true}");
+      } else {
+        System.out.println("VALID: " + file.getPath());
+      }
+      return 0;
+    } catch (LoadFailedException ex) {
+      final var message = ex.getMessage() == null ? "Unknown validation error" : ex.getMessage();
+      final var lineCol = java.util.regex.Pattern.compile("line(?:Number)?\\D+(\\d+).*column(?:Number)?\\D+(\\d+)", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(message);
+      final var location = lineCol.find() ? ("line=" + lineCol.group(1) + ",column=" + lineCol.group(2)) : null;
+      final var errorType = message.toLowerCase().contains("xml") ? "xml_parse" : "validation";
+      if (validateJsonOutput) {
+        final var safeFile = file.getPath().replace("\\", "\\\\").replace("\"", "\\\"");
+        final var safeMessage = message.replace("\\", "\\\\").replace("\"", "\\\"");
+        final var safeLocation = location == null ? "null" : ("\"" + location.replace("\"", "\\\"") + "\"");
+        System.out.println("{\"file\":\"" + safeFile + "\",\"valid\":false,\"errorType\":\"" + errorType + "\",\"message\":\"" + safeMessage + "\",\"location\":" + safeLocation + "}");
+      } else {
+        System.out.println("INVALID: " + file.getPath());
+        System.out.println("  type: " + errorType);
+        System.out.println("  message: " + message);
+        if (location != null) System.out.println("  location: " + location);
+      }
+      return 1;
+    } catch (Exception ex) {
+      if (validateJsonOutput) {
+        final var safeFile = file.getPath().replace("\\", "\\\\").replace("\"", "\\\"");
+        final var safeMessage = String.valueOf(ex.getMessage()).replace("\\", "\\\\").replace("\"", "\\\"");
+        System.out.println("{\"file\":\"" + safeFile + "\",\"valid\":false,\"errorType\":\"internal\",\"message\":\"" + safeMessage + "\",\"location\":null}");
+      } else {
+        System.err.println("INTERNAL ERROR validating " + file.getPath() + ": " + ex.getMessage());
+      }
+      return 2;
+    }
+  }
+
   public void run() {
+    if (validateCircPath != null) {
+      System.exit(runValidateCirc());
+    }
     if (isTty) {
       try {
         TtyInterface.run(this);
